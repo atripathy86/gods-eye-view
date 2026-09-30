@@ -932,6 +932,14 @@ Browser startup now lives in `src/standalone/`. That directory contains only
 browser code; Node configuration remains under `server/`. Application lifecycle
 and viewer export paths are unchanged.
 
+`server/standalone/headless.mjs` mounts the same provider plugins onto a
+plain Node `http.Server` via a small Connect-compatible router
+(`server/standalone/connectRouter.js`), so the provider API can run as its
+own process without Vite's dev/preview server. It excludes the dev-only
+`gev-key-setup` panel (its handler calls a Vite-only `server.restart()`)
+and adds `GET /healthz`. `docs/API_REFERENCE.md` documents every endpoint
+it exposes.
+
 ## Application startup and shutdown
 
 The standalone entry now composes scene setup, controls, layer registration and

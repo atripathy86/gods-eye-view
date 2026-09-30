@@ -1,5 +1,12 @@
 # Changelog
 
+- Add a standalone way to run the `/api/*` provider proxies without Vite.
+  `server/standalone/headless.mjs` mounts the same provider middleware
+  `vite dev`/`vite preview` use onto a plain Node server, so the provider
+  API can run unattended — CONTRIBUTING.md already notes `vite preview`
+  "is not a production server". `docs/API_REFERENCE.md` documents every
+  endpoint it exposes (atripathy86, #860).
+
 - CCTV cameras whose bearing is a guess now say so. Packs mark bearings derived
   from a hash of the camera id as `headingConfidence: 'low'`, but nothing read the
   flag, so roughly 70% of a default catalog rendered like surveyed facings. The HUD
