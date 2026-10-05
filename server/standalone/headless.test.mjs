@@ -1,3 +1,4 @@
+import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -5,7 +6,9 @@ import {
   createHeadlessApiApp,
   healthzPlugin,
   headlessProviderPlugins,
+  isHostAllowed,
   isLoopbackHost,
+  parseAllowedHosts,
   startHeadlessApi,
 } from './headless.mjs';
 import { apiNotFoundPlugin } from './api-not-found.js';
@@ -188,6 +191,108 @@ test('a refused bind fails before any provider is mounted', async () => {
     /refusing to bind/,
   );
   assert.equal(mounted, false);
+});
+
+test('isHostAllowed mirrors Vite: IP literals, localhost names, the bind host, and listed hosts', () => {
+  const allow = (host, options) => isHostAllowed(host, options);
+  for (const host of [
+    '127.0.0.1:4174',
+    '192.168.1.5',
+    '[::1]:4174',
+    'localhost:4174',
+    'api.localhost',
+  ]) {
+    assert.equal(allow(host), true, host);
+  }
+  // DNS rebinding: an attacker-controlled name resolving to 127.0.0.1.
+  for (const host of [
+    'evil.example',
+    'evil.example:4174',
+    '',
+    undefined,
+    '[not-ipv6]',
+    'localhost.evil.com',
+  ]) {
+    assert.equal(allow(host), false, String(host));
+  }
+  assert.equal(
+    allow('host.docker.internal:4174', {
+      allowedHosts: ['host.docker.internal'],
+    }),
+    true,
+  );
+  assert.equal(
+    allow('api.example.com', { allowedHosts: ['.example.com'] }),
+    true,
+  );
+  assert.equal(allow('example.com', { allowedHosts: ['.example.com'] }), true);
+  assert.equal(
+    allow('badexample.com', { allowedHosts: ['.example.com'] }),
+    false,
+  );
+  assert.equal(allow('myhost:4174', { bindHost: 'myhost' }), true);
+  assert.deepEqual(parseAllowedHosts(' a.example , .b.example ,,'), [
+    'a.example',
+    '.b.example',
+  ]);
+});
+
+/** One real HTTP request with an explicit Host header against a started server. */
+function requestWithHost(port, path, host, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method, headers: { Host: host } },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('an unexpected Host is rejected before routing, on a real listening server', async () => {
+  let reached = 0;
+  const probe = {
+    name: 'probe',
+    configureServer(server) {
+      server.middlewares.use('/api/probe', (_req, res) => {
+        reached += 1;
+        res.writeHead(200, {});
+        res.end('ok');
+      });
+    },
+  };
+  const app = await startHeadlessApi({
+    env: { GEV_HEADLESS_ALLOWED_HOSTS: 'host.docker.internal' },
+    port: 0,
+    plugins: [probe, apiNotFoundPlugin()],
+  });
+  try {
+    const { port } = app.httpServer.address();
+    const rebound = await requestWithHost(port, '/api/probe', 'evil.example');
+    assert.equal(rebound.status, 403);
+    assert.equal(JSON.parse(rebound.body).error, 'host_not_allowed');
+    assert.equal(reached, 0, 'a rejected request must never reach a provider');
+    assert.equal(
+      (await requestWithHost(port, '/api/probe', `127.0.0.1:${port}`)).status,
+      200,
+    );
+    assert.equal(
+      (await requestWithHost(port, '/api/probe', `localhost:${port}`)).status,
+      200,
+    );
+    assert.equal(
+      (await requestWithHost(port, '/api/probe', 'host.docker.internal'))
+        .status,
+      200,
+    );
+    assert.equal(reached, 3);
+  } finally {
+    await app.close();
+  }
 });
 
 test('close() tears down cleanly even when the server was never started', async () => {

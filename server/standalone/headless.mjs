@@ -1,9 +1,13 @@
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { localProviderPlugins } from '../providers/local.js';
 import { apiNotFoundPlugin } from './api-not-found.js';
 import { createConnectRouter, shadowedMounts } from './connectRouter.js';
+
+const DEFAULT_PORT = 4174;
+const DEFAULT_HOST = '127.0.0.1';
 
 /**
  * Run the same `/api/*` provider proxies `vite dev` / `vite preview` serve,
@@ -73,6 +77,68 @@ export function healthzPlugin() {
 }
 
 /**
+ * Should a request carrying this `Host` header be served?
+ *
+ * Listening on 127.0.0.1 does not by itself stop a hostile web page from
+ * reaching this server: through DNS rebinding, a hostname the attacker
+ * controls can be made to resolve to 127.0.0.1, and the browser then sends
+ * the page's requests here with that hostname in `Host`. This server has no
+ * authentication and serves credential-backed routes, so it must reject
+ * hostnames it does not expect (review feedback on #860).
+ *
+ * This mirrors Vite's own check (`isHostAllowedWithoutCache` in Vite's
+ * bundled server), which `vite dev`/`vite preview` apply to these same
+ * routes:
+ * - IP literals are always allowed (IPv4, or bracketed IPv6). Rebinding
+ *   needs an attacker-controlled *name*, so an address cannot be abused
+ *   this way.
+ * - `localhost` and any `*.localhost` name are allowed.
+ * - The configured bind host itself is allowed, when it is a name.
+ * - Each entry in `allowedHosts` (from the comma-separated
+ *   `GEV_HEADLESS_ALLOWED_HOSTS`) is allowed. As in Vite, an entry with a
+ *   leading dot (`.example.com`) allows that domain and all its subdomains.
+ * - A missing `Host` header is rejected.
+ *
+ * Unlike this repository's Vite config, which turns the check off entirely
+ * when bound to 0.0.0.0, headless keeps it on: a public bind is exactly
+ * when an unexpected hostname should be refused, and a reverse proxy or
+ * container can be listed explicitly.
+ */
+export function isHostAllowed(
+  hostHeader,
+  { allowedHosts = [], bindHost = '' } = {},
+) {
+  const host = String(hostHeader ?? '')
+    .trim()
+    .toLowerCase();
+  if (!host) return false;
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    return end > 0 && net.isIP(host.slice(1, end)) === 6;
+  }
+  const hostname = host.replace(/:\d+$/, '');
+  if (net.isIP(hostname) === 4) return true;
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
+  if (bindHost && hostname === String(bindHost).toLowerCase()) return true;
+  return allowedHosts.some((entry) => {
+    const allowed = String(entry).trim().toLowerCase();
+    if (!allowed) return false;
+    if (allowed.startsWith('.')) {
+      return hostname === allowed.slice(1) || hostname.endsWith(allowed);
+    }
+    return hostname === allowed;
+  });
+}
+
+/** Parses the comma-separated `GEV_HEADLESS_ALLOWED_HOSTS` value. */
+export function parseAllowedHosts(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
  * Build the headless API app without starting it: a router with every given
  * plugin's middleware mounted, in the given order. Returns the pieces
  * unstarted so a test can drive requests through `router.handle` directly,
@@ -90,9 +156,29 @@ export function createHeadlessApiApp({
     ...headlessProviderPlugins(),
     apiNotFoundPlugin(),
   ],
+  allowedHosts = [],
+  bindHost = DEFAULT_HOST,
 } = {}) {
   const router = createConnectRouter();
-  const httpServer = http.createServer((req, res) => router.handle(req, res));
+  // The Host check runs before any routing, so a rejected request never
+  // reaches a provider (see isHostAllowed for what is accepted and why).
+  const httpServer = http.createServer((req, res) => {
+    if (!isHostAllowed(req.headers.host, { allowedHosts, bindHost })) {
+      res.writeHead(403, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      res.end(
+        JSON.stringify({
+          error: 'host_not_allowed',
+          host: String(req.headers.host ?? '').replace(/:\d+$/, ''),
+          hint: 'Add this host to GEV_HEADLESS_ALLOWED_HOSTS to allow it.',
+        }),
+      );
+      return;
+    }
+    router.handle(req, res);
+  });
   const fakeViteServer = { middlewares: router, httpServer };
   const teardowns = [];
   for (const plugin of plugins) {
@@ -139,9 +225,6 @@ export function createHeadlessApiApp({
   }
   return { router, httpServer, close };
 }
-
-const DEFAULT_PORT = 4174;
-const DEFAULT_HOST = '127.0.0.1';
 
 /**
  * Is `host` a loopback bind address, reachable only from this machine?
@@ -207,7 +290,9 @@ export function assertSafeBindHost(host, env = process.env) {
  * no auth of its own (matching the app's existing same-origin-only design).
  * Override the address with `GEV_HEADLESS_PORT` / `GEV_HEADLESS_HOST`; a
  * non-loopback host additionally requires `GEV_HEADLESS_UNSAFE_PUBLIC=1`
- * (see `assertSafeBindHost`).
+ * (see `assertSafeBindHost`). Requests whose `Host` is not an IP literal,
+ * a localhost name, the bind host, or listed in the comma-separated
+ * `GEV_HEADLESS_ALLOWED_HOSTS` are rejected with 403 (see `isHostAllowed`).
  *
  * `env` and `plugins` exist for tests: `plugins` replaces the real provider
  * composition, which touches network and API-key state as soon as it is
@@ -229,7 +314,11 @@ export async function startHeadlessApi({
         'network without authentication.',
     );
   }
-  const app = createHeadlessApiApp(plugins ? { plugins } : undefined);
+  const app = createHeadlessApiApp({
+    ...(plugins ? { plugins } : {}),
+    allowedHosts: parseAllowedHosts(env.GEV_HEADLESS_ALLOWED_HOSTS),
+    bindHost: host,
+  });
   await new Promise((resolve) => app.httpServer.listen(port, host, resolve));
   console.log(`[headless-api] listening on http://${host}:${port}`);
   return app;
