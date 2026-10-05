@@ -8,6 +8,8 @@ import { createConnectRouter, shadowedMounts } from './connectRouter.js';
 
 const DEFAULT_PORT = 4174;
 const DEFAULT_HOST = '127.0.0.1';
+/** How long close() lets in-flight responses drain before force-closing them. */
+const DEFAULT_SHUTDOWN_GRACE_MS = 5000;
 
 /**
  * Run the same `/api/*` provider proxies `vite dev` / `vite preview` serve,
@@ -63,13 +65,32 @@ export function healthzPlugin() {
   return {
     name: 'gev-headless-healthz',
     configureServer(server) {
-      server.middlewares.use('/healthz', (_req, res) => {
+      server.middlewares.use('/healthz', (req, res, next) => {
+        // The mount matches /healthz and everything below it (connect
+        // semantics), but the contract is exactly GET /healthz. After the
+        // router's rewrite, an exact hit is "/" (plus any query string);
+        // anything deeper falls through to the router's 404 rather than
+        // answering a misleading 200.
+        const rest = (req.url || '/').split('?')[0];
+        if (rest !== '/') return next();
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, {
+            Allow: 'GET, HEAD',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          });
+          res.end(JSON.stringify({ error: 'method_not_allowed' }));
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-store',
         });
+        // HEAD gets the same status and headers without a body.
         res.end(
-          JSON.stringify({ ok: true, uptimeMs: Date.now() - startedAtMs }),
+          req.method === 'HEAD'
+            ? undefined
+            : JSON.stringify({ ok: true, uptimeMs: Date.now() - startedAtMs }),
         );
       });
     },
@@ -158,6 +179,7 @@ export function createHeadlessApiApp({
   ],
   allowedHosts = [],
   bindHost = DEFAULT_HOST,
+  shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS,
 } = {}) {
   const router = createConnectRouter();
   // The Host check runs before any routing, so a rejected request never
@@ -187,8 +209,40 @@ export function createHeadlessApiApp({
       teardowns.push(plugin.closeBundle);
   }
 
-  async function close() {
-    await new Promise((resolve) => httpServer.close(() => resolve()));
+  // Bounded shutdown. httpServer.close() stops accepting connections but
+  // then waits for every open response to finish, and a long-lived CCTV
+  // media response may never finish on its own, which would hold SIGTERM
+  // open indefinitely. The CCTV puller, the AIS watchdog and the transit
+  // service also wait for the server's 'close' event to clean up, so their
+  // teardown was held hostage by the same connection. Instead: close idle
+  // keep-alive sockets immediately, give in-flight responses a bounded
+  // grace period to drain, then force-close whatever is left. The server's
+  // 'close' event (and so every provider's cleanup) follows promptly, and
+  // only then do the plugins' own teardowns run. close() is idempotent, so
+  // a second signal does not start a second shutdown.
+  let closing = null;
+  function close({ graceMs = shutdownGraceMs } = {}) {
+    if (!closing) closing = shutDown(graceMs);
+    return closing;
+  }
+  async function shutDown(graceMs) {
+    const closed = new Promise((resolve) => httpServer.close(() => resolve()));
+    httpServer.closeIdleConnections?.();
+    let timer;
+    const drained = await Promise.race([
+      closed.then(() => true),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), graceMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!drained) {
+      console.warn(
+        `[headless-api] responses still open after ${graceMs} ms; closing their connections`,
+      );
+      httpServer.closeAllConnections?.();
+      await closed;
+    }
     for (const closeBundle of teardowns) {
       try {
         await closeBundle();
@@ -318,8 +372,33 @@ export async function startHeadlessApi({
     ...(plugins ? { plugins } : {}),
     allowedHosts: parseAllowedHosts(env.GEV_HEADLESS_ALLOWED_HOSTS),
     bindHost: host,
+    shutdownGraceMs:
+      Number.parseInt(env.GEV_HEADLESS_SHUTDOWN_GRACE_MS || '', 10) ||
+      DEFAULT_SHUTDOWN_GRACE_MS,
   });
-  await new Promise((resolve) => app.httpServer.listen(port, host, resolve));
+  // listen() reports failure (port in use, an address that cannot be bound)
+  // by emitting 'error', never by calling its callback. Without a listener
+  // that event crashes the process, and the providers that
+  // createHeadlessApiApp() already initialized are never torn down. Reject
+  // instead, tear down, and hand the original error to the caller.
+  try {
+    await new Promise((resolve, reject) => {
+      const onError = (err) => {
+        app.httpServer.off('listening', onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        app.httpServer.off('error', onError);
+        resolve();
+      };
+      app.httpServer.once('error', onError);
+      app.httpServer.once('listening', onListening);
+      app.httpServer.listen(port, host);
+    });
+  } catch (err) {
+    await app.close().catch(() => {});
+    throw err;
+  }
   console.log(`[headless-api] listening on http://${host}:${port}`);
   return app;
 }
@@ -339,7 +418,15 @@ if (import.meta.url === invokedPath) {
     // may already be set directly in the environment (e.g. Docker's
     // `env_file:`), which is a normal and supported way to run this.
   }
-  const app = await startHeadlessApi();
+  let app;
+  try {
+    app = await startHeadlessApi();
+  } catch (err) {
+    // A refused bind or a listen failure: providers are already torn down
+    // by startHeadlessApi, so report the reason and exit non-zero.
+    console.error(`[headless-api] failed to start: ${err?.message || err}`);
+    process.exit(1);
+  }
   const shutdown = (signal) => {
     console.log(`[headless-api] ${signal} received, shutting down`);
     app.close().then(() => process.exit(0));

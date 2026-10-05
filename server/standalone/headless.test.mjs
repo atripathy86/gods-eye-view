@@ -295,6 +295,107 @@ test('an unexpected Host is rejected before routing, on a real listening server'
   }
 });
 
+test('/healthz answers exactly GET/HEAD /healthz, and nothing else', async () => {
+  const app = createHeadlessApiApp({ plugins: [healthzPlugin()] });
+  const call = (url, method) => {
+    const { req, res } = mockReqRes(url, method);
+    app.router.handle(req, res);
+    return res;
+  };
+  const ok = call('/healthz', 'GET');
+  assert.equal(ok.statusCode, 200);
+  assert.equal(JSON.parse(ok.body).ok, true);
+  assert.equal(call('/healthz?probe=1', 'GET').statusCode, 200);
+  const head = call('/healthz', 'HEAD');
+  assert.equal(head.statusCode, 200);
+  assert.equal(head.body, '');
+  const post = call('/healthz', 'POST');
+  assert.equal(post.statusCode, 405);
+  assert.equal(post.headers.Allow, 'GET, HEAD');
+  // Deeper paths are not the health endpoint: they fall through to 404.
+  assert.equal(call('/healthz/anything', 'GET').statusCode, 404);
+  assert.equal(call('/healthz.json', 'GET').statusCode, 404);
+  await app.close();
+});
+
+test('a listen failure rejects with the original error and tears the providers down', async () => {
+  // Occupy a port, then ask the headless server to bind the same one.
+  const blocker = http.createServer();
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+  const { port } = blocker.address();
+  let tornDown = false;
+  const plugin = {
+    name: 'probe',
+    configureServer() {},
+    closeBundle: () => {
+      tornDown = true;
+    },
+  };
+  try {
+    await assert.rejects(
+      () => startHeadlessApi({ env: {}, port, plugins: [plugin] }),
+      (err) => err.code === 'EADDRINUSE',
+    );
+    assert.equal(
+      tornDown,
+      true,
+      'providers initialized before listen() must be torn down',
+    );
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+  }
+});
+
+test('shutdown is bounded even while a response never finishes', async () => {
+  // A stand-in for a long-lived CCTV media response: headers sent, body
+  // never ended. Unbounded, httpServer.close() would wait for it forever.
+  let closeEventSeen = false;
+  let tornDown = false;
+  const plugin = {
+    name: 'stream',
+    configureServer(server) {
+      server.httpServer.on('close', () => {
+        closeEventSeen = true;
+      });
+      server.middlewares.use('/api/stream', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        res.write('first chunk');
+      });
+    },
+    closeBundle: () => {
+      tornDown = true;
+    },
+  };
+  const app = await startHeadlessApi({ env: {}, port: 0, plugins: [plugin] });
+  const { port } = app.httpServer.address();
+  await new Promise((resolve) => {
+    const req = http.get(
+      { host: '127.0.0.1', port, path: '/api/stream' },
+      (res) => {
+        res.once('data', resolve); // the stream is now open and in flight
+        res.on('error', () => {}); // force-closed during shutdown; expected
+      },
+    );
+    req.on('error', () => {});
+  });
+  const started = Date.now();
+  await app.close({ graceMs: 200 });
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 3000,
+    `shutdown took ${elapsed} ms despite a 200 ms grace period`,
+  );
+  assert.equal(closeEventSeen, true, "providers' 'close' listeners must run");
+  assert.equal(tornDown, true);
+});
+
+test('close() is idempotent', async () => {
+  const app = createHeadlessApiApp({ plugins: [] });
+  const first = app.close();
+  assert.equal(app.close(), first);
+  await first;
+});
+
 test('close() tears down cleanly even when the server was never started', async () => {
   const app = createHeadlessApiApp({ plugins: [] });
   await assert.doesNotReject(() => app.close());
