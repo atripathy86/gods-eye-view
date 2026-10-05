@@ -10,6 +10,7 @@ import {
 } from '../../server/apiRoutes.js';
 import { localProviderPlugins } from '../../server/providers/local.js';
 import { apiNotFoundPlugin } from '../../server/standalone/api-not-found.js';
+import { headlessProviderPlugins } from '../../server/standalone/headless.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -80,6 +81,27 @@ test('the preview server installs the same chain minus the serveOnly mounts', ()
   assert.deepEqual(
     serveOnly.map(({ mount }) => mount),
     ['/api/setup/status', '/api/setup/keys'],
+  );
+});
+
+test('the headless server is a third surface: the preview chain, by a different route', () => {
+  // server/standalone/headless.mjs calls every plugin's configureServer hook
+  // directly and ignores `apply`; it keeps key setup out by plugin *name*
+  // instead (headlessProviderPlugins). Its /api surface therefore has to be
+  // checked on its own rather than assumed from either Vite surface. Today
+  // it matches preview exactly: every row except the serveOnly ones.
+  const mounts = [];
+  const recorder = {
+    middlewares: { use: (mount) => mounts.push(mount) },
+    httpServer: null,
+    config: { root: repositoryRoot },
+  };
+  for (const plugin of [...headlessProviderPlugins(), apiNotFoundPlugin()]) {
+    plugin.configureServer?.(recorder);
+  }
+  assert.deepEqual(
+    mounts,
+    API_ROUTES.filter((route) => !route.serveOnly).map(({ mount }) => mount),
   );
 });
 

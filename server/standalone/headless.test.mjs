@@ -89,6 +89,32 @@ test('an unregistered /api path falls through to the same 404 vite preview uses'
   await app.close();
 });
 
+test('refuses to build an app whose /api fallback would swallow a provider', () => {
+  // Installed first, the catch-all would answer every /api request while
+  // the provider's handler still looks correct in isolation. Fail loudly.
+  assert.throws(
+    () =>
+      createHeadlessApiApp({
+        plugins: [apiNotFoundPlugin(), stubProvider('stub', '/api/stub', {})],
+      }),
+    /unreachable mount\(s\): \/api\/stub \(covered by earlier \/api\)/,
+  );
+});
+
+test('refuses to build an app that mounts the same path twice', () => {
+  assert.throws(
+    () =>
+      createHeadlessApiApp({
+        plugins: [
+          stubProvider('a', '/api/dup', {}),
+          stubProvider('b', '/api/dup', {}),
+          apiNotFoundPlugin(),
+        ],
+      }),
+    /\/api\/dup \(covered by earlier \/api\/dup\)/,
+  );
+});
+
 test('close() tears down cleanly even when the server was never started', async () => {
   const app = createHeadlessApiApp({ plugins: [] });
   await assert.doesNotReject(() => app.close());

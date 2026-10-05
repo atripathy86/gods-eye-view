@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { localProviderPlugins } from '../providers/local.js';
 import { apiNotFoundPlugin } from './api-not-found.js';
-import { createConnectRouter } from './connectRouter.js';
+import { createConnectRouter, shadowedMounts } from './connectRouter.js';
 
 /**
  * Run the same `/api/*` provider proxies `vite dev` / `vite preview` serve,
@@ -100,6 +100,7 @@ export function createHeadlessApiApp({
     if (typeof plugin.closeBundle === 'function')
       teardowns.push(plugin.closeBundle);
   }
+
   async function close() {
     await new Promise((resolve) => httpServer.close(() => resolve()));
     for (const closeBundle of teardowns) {
@@ -112,6 +113,29 @@ export function createHeadlessApiApp({
         );
       }
     }
+  }
+
+  // Mount order is this module's contract, not something inherited from
+  // connect: the router reimplements connect's first-match routing, so an
+  // `/api` catch-all installed too early, or a path mounted twice, would
+  // silently make providers unreachable while every handler still looks
+  // correct. Refuse to build such an app rather than serve it. The real
+  // composition is also pinned against server/apiRoutes.js by
+  // src/tooling/apiRoutes.test.mjs; this check covers any composition.
+  const shadowed = shadowedMounts(router.mounts());
+  if (shadowed.length) {
+    // Providers were already configured above, and some start background
+    // work when mounted, so tear them down before refusing.
+    close().catch(() => {});
+    throw new Error(
+      `[headless-api] unreachable mount(s): ${shadowed
+        .map(
+          ({ path, coveredBy }) => `${path} (covered by earlier ${coveredBy})`,
+        )
+        .join(
+          ', ',
+        )} — the /api fallback must be installed last, and each path once`,
+    );
   }
   return { router, httpServer, close };
 }

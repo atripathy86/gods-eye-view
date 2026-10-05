@@ -22,6 +22,13 @@
  * records) a bare `apply: 'serve'` would still configure under preview. Rows
  * absent from preview carry `serveOnly`, and the test builds both chains rather
  * than assuming one surface.
+ *
+ * The standalone server (`server/standalone/headless.mjs`, #860) is a third
+ * surface. It calls every plugin's `configureServer` itself and ignores
+ * `apply`, keeping key setup out by plugin name instead, so it reaches the
+ * same 32 mounts as preview by a different route. The test checks it
+ * separately for that reason. Headless also serves `/healthz`, which sits
+ * outside `/api` and therefore outside this table.
  */
 export const API_FALLBACK_MOUNT = '/api';
 

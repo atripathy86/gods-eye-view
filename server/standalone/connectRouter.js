@@ -50,7 +50,10 @@ function splitUrl(url) {
 function mountMatch(url, mountPath) {
   if (mountPath === '/') return { matched: true, rest: url };
   const { pathname } = splitUrl(url);
-  if (pathname.slice(0, mountPath.length).toLowerCase() !== mountPath.toLowerCase()) {
+  if (
+    pathname.slice(0, mountPath.length).toLowerCase() !==
+    mountPath.toLowerCase()
+  ) {
     return { matched: false, rest: null };
   }
   const boundary = pathname.charAt(mountPath.length);
@@ -59,6 +62,39 @@ function mountMatch(url, mountPath) {
   }
   const rest = url.slice(mountPath.length);
   return { matched: true, rest: rest.startsWith('/') ? rest : `/${rest}` };
+}
+
+/**
+ * Mounts that can never be reached, because an earlier mount already
+ * matches every request they would match. First match wins (see `handle`),
+ * so a later mount fully covered by an earlier one is dead unless the
+ * earlier handler calls `next()`, and no provider does that today.
+ *
+ * The case this exists for is the `/api` catch-all
+ * (`server/standalone/api-not-found.js`). It behaves as a fallback only
+ * because it is installed last; installed earlier, it swallows every
+ * provider below it while each handler still looks correct in isolation.
+ * An identical path mounted twice is the same failure.
+ *
+ * "Covers" uses `mountMatch` itself, so it follows connect's rules exactly:
+ * `/api/opensky` does not cover `/api/opensky-track` (no boundary after the
+ * prefix), but `/api` covers `/api/anything` and `/api.json`. Root mounts
+ * (`use(handler)` with no path) are ignored, because they are
+ * pass-through middleware by convention rather than routes.
+ *
+ * @param {string[]} paths Mount paths in installation order.
+ * @returns {{path: string, coveredBy: string}[]} Every unreachable mount.
+ */
+export function shadowedMounts(paths) {
+  const shadowed = [];
+  paths.forEach((path, index) => {
+    if (path === '/') return;
+    const earlier = paths
+      .slice(0, index)
+      .find((prior) => prior !== '/' && mountMatch(path, prior).matched);
+    if (earlier !== undefined) shadowed.push({ path, coveredBy: earlier });
+  });
+  return shadowed;
 }
 
 function defaultNotFound(_req, res) {
@@ -130,5 +166,10 @@ export function createConnectRouter({
     next();
   }
 
-  return { use, handle };
+  /** Mount paths in installation order, for `shadowedMounts` and tests. */
+  function mounts() {
+    return stack.map((layer) => layer.path);
+  }
+
+  return { use, handle, mounts };
 }

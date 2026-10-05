@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createConnectRouter } from './connectRouter.js';
+import { createConnectRouter, shadowedMounts } from './connectRouter.js';
 
 function mockReqRes(url, method = 'GET') {
   const req = { url, method, headers: {} };
@@ -158,6 +158,39 @@ for (const [url, expectedRest] of CONNECT_PARITY) {
     }
   });
 }
+
+test('shadowedMounts flags anything installed after a mount that covers it', () => {
+  // The catch-all installed first swallows everything below it.
+  assert.deepEqual(shadowedMounts(['/api', '/api/opensky', '/api.json']), [
+    { path: '/api/opensky', coveredBy: '/api' },
+    { path: '/api.json', coveredBy: '/api' },
+  ]);
+  // The same path twice: the second is dead.
+  assert.deepEqual(shadowedMounts(['/api/gbfs', '/api/gbfs']), [
+    { path: '/api/gbfs', coveredBy: '/api/gbfs' },
+  ]);
+  // Case-insensitive, like connect.
+  assert.deepEqual(shadowedMounts(['/API', '/api/x']), [
+    { path: '/api/x', coveredBy: '/API' },
+  ]);
+});
+
+test('shadowedMounts accepts the real shape: specific mounts first, catch-all last', () => {
+  assert.deepEqual(
+    shadowedMounts([
+      '/healthz',
+      // A name that merely extends an earlier one is not covered by it.
+      '/api/opensky',
+      '/api/opensky-track',
+      '/api/adsblol/mil',
+      '/api/adsblol/trace',
+      '/api',
+    ]),
+    [],
+  );
+  // Root mounts are pass-through middleware, never treated as covering.
+  assert.deepEqual(shadowedMounts(['/', '/api/x', '/api']), []);
+});
 
 test('calling next() falls through to the next matching mount', () => {
   const router = createConnectRouter();
