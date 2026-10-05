@@ -937,8 +937,15 @@ plain Node `http.Server` via a small Connect-compatible router
 (`server/standalone/connectRouter.js`), so the provider API can run as its
 own process without Vite's dev/preview server. It excludes the dev-only
 `gev-key-setup` panel (its handler calls a Vite-only `server.restart()`)
-and adds `GET /healthz`. `docs/API_REFERENCE.md` documents every endpoint
-it exposes.
+and adds `GET /healthz`. Its router reproduces connect's mount matching
+exactly, and refuses to start if any mount would be unreachable (for
+example, the `/api` fallback installed before a provider). It binds to
+loopback by default, refuses a non-loopback bind unless
+`GEV_HEADLESS_UNSAFE_PUBLIC=1` is set, rejects unexpected `Host` headers
+(allowlist: `GEV_HEADLESS_ALLOWED_HOSTS`), and bounds shutdown.
+`server/apiRoutes.js` is the complete `/api` mount table, as data, for all
+three surfaces; `docs/API_REFERENCE.md` documents a selected subset of those
+routes in detail.
 
 ## Application startup and shutdown
 

@@ -4,8 +4,12 @@
   `server/standalone/headless.mjs` mounts the same provider middleware
   `vite dev`/`vite preview` use onto a plain Node server, so the provider
   API can run unattended — CONTRIBUTING.md already notes `vite preview`
-  "is not a production server". `docs/API_REFERENCE.md` documents every
-  endpoint it exposes (atripathy86, #860).
+  "is not a production server". It refuses a non-loopback bind unless
+  `GEV_HEADLESS_UNSAFE_PUBLIC=1` is set, rejects unexpected `Host` headers,
+  and bounds shutdown. `server/apiRoutes.js` lists every `/api` mount as data,
+  with a test pinning it against the dev, preview and headless servers
+  (daikaginza, #793), and `docs/API_REFERENCE.md` documents a selected subset
+  of those routes in detail (atripathy86, #860).
 
 - CCTV cameras whose bearing is a guess now say so. Packs mark bearings derived
   from a hash of the camera id as `headingConfidence: 'low'`, but nothing read the

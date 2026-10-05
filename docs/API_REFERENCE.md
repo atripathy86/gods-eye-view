@@ -17,10 +17,18 @@ It is **not** a full audit of all ~20 providers in `server/providers/*` — see
 [§8](#8-known-gaps-in-provider-self-documentation) for which provider files
 still have no endpoint-level docs of their own at all.
 
+**The complete list of mounts is not here; it is
+[`server/apiRoutes.js`](../server/apiRoutes.js)**, the `/api` mount table as
+data, which `src/tooling/apiRoutes.test.mjs` checks against what the dev,
+preview and headless servers actually install. This document covers a
+selected subset of those routes in endpoint-level detail.
+
 Every endpoint here works identically whether served by `vite dev`,
-`vite preview`, or `node server/standalone/headless.mjs` — they're the exact
-same middleware in all three cases. The examples below were captured from a
-live `headless.mjs` run.
+`vite preview`, or `node server/standalone/headless.mjs`: it is the same
+middleware in all three cases, and the headless router reproduces Vite's
+connect routing exactly (case-insensitive prefixes, with `/` or `.` ending a
+mount, so `/api/gbfs.json` reaches the `/api/gbfs` handler). The examples
+below were captured from a live `headless.mjs` run.
 
 ## Conventions
 
@@ -29,9 +37,11 @@ live `headless.mjs` run.
   same-origin caller. `plan.md` covers adding auth/TLS before any of this is
   reachable off-box; nothing below should be treated as safe to expose
   publicly as-is.
-- `Cache-Control: no-store` on live-data responses is deliberate — caching is
-  handled server-side (in-memory/disk, documented per endpoint), not via
-  HTTP caching semantics.
+- `Cache-Control` is set per endpoint and documented per endpoint below; do
+  not assume every response is uncacheable. Most proxies cache server-side
+  and send `no-store`, but a fresh transit vehicle snapshot is sent as
+  `public, max-age=15` (see §4), so an HTTP cache between a client and this
+  server may legitimately answer repeat polls for up to 15 seconds.
 - An endpoint's own freshness/staleness signaling (headers or body fields) is
   part of its contract — a response can be `200 OK` and _stale_. Treat
   "stale" and "absent" as different facts, not as data quality.
@@ -41,6 +51,10 @@ live `headless.mjs` run.
 ## 1. `GET /healthz` (new — `headless.mjs` only, not present under `vite dev`/`vite preview`)
 
 Liveness/readiness check for the standalone process. No query params.
+Only `GET` and `HEAD` of exactly `/healthz` are answered: any other method
+gets `405` with `Allow: GET, HEAD`, and a deeper path such as
+`/healthz/anything` gets `404`. `HEAD` returns the same status and headers
+with no body.
 
 **Response `200`:**
 
@@ -97,9 +111,22 @@ rather than branching on which path served the response.
 | `X-OpenSky-Retry-After-Seconds`                                                               | Present only during a rate-limit cooldown                         |
 | `X-Flight-Source: adsb.lol` / `X-Flight-Coverage: 250nm regional fallback` / `X-Flight-Count` | Present only on the regional-fallback path                        |
 
-**Status codes:** `200` on any served snapshot (fresh, stale, or fallback).
-`429` with `{"error":"OpenSky rate limited; proxy cooling down."}` only when
-rate-limited **and** nothing cached **and** no usable fallback anchor.
+**Status codes:**
+
+- `200` on any served snapshot: fresh, stale, or the adsb.lol regional
+  fallback.
+- `429` with `{"error":"OpenSky rate limited; proxy cooling down."}` only when
+  rate-limited **and** nothing cached **and** no usable fallback anchor.
+- Any other non-2xx status from OpenSky is **passed through unchanged** when
+  neither the cache nor the regional fallback can serve the request. For
+  `401`/`403` the body is an auth-specific `{"error": ...}` message, and
+  `X-OpenSky-Auth-Reason` names the cause: `missing_basic_creds`,
+  `oauth_invalid_or_missing`, `basic_invalid_credentials`,
+  `oauth_invalid_credentials`, `missing_oauth_and_basic_creds`, or
+  `auth_required`.
+- `502` with `{"error":"OpenSky proxy error"}` (and
+  `X-OpenSky-Auth-Reason: proxy_error`) when the proxy itself fails, for
+  example on a network error, with nothing cached and no regional fallback.
 
 **Caching:** in-memory, TTL adapts 9s–300s to OpenSky's own remaining rate
 budget (`X-Rate-Limit-Remaining`) — see the header block in
@@ -295,11 +322,28 @@ every vehicle from `repairVehicleTimestamps`, in addition to the fields
 be read together with this one field added.
 
 **Headers:** `X-GEV-Cache` (`HIT`/`MISS`/`STALE-ERROR`/`NONE`), optional
-`X-Transit-Upstream` (source host) and `X-Transit-Contact` (epoch seconds the
-operator last actually answered — distinct from `fetchedAt`/`feedTimestamp`,
-since a 304-revalidated feed keeps its original fetch time). `503` with
-`{"error":"Transit feed unavailable","feedId","retryInSec"}` when nothing
-cached and upstream is down; `Retry-After` header included.
+`X-Transit-Upstream` (source host) and `X-Transit-Contact`, the time the
+operator last actually answered, in **epoch milliseconds** (unlike
+`feedTimestamp`, which is in seconds). It differs from `fetchedAt` because a
+304-revalidated feed keeps its original fetch time. `Cache-Control` is
+`public, max-age=15` on a normal response and `no-store` on `STALE-ERROR` and
+error responses.
+
+**Failure statuses** (each with a JSON `{"error", "feedId", "retryInSec"}`
+body and a `Retry-After` header), when nothing cached can be served:
+
+- `502`: the operator answered badly. Its HTTP status was an error, the
+  response was too large, or the feed is differential, which is unsupported
+  (that case says so in `error`).
+- `504`: any other failure to fetch the feed, such as a timeout or a network
+  error.
+- `503` (`"Transit feed unavailable"`): the feed is in a retry cooldown after
+  a recent failure, so no upstream request was made; retry after
+  `retryInSec`. A `503` with `"Transit provider closed"` means the server is
+  shutting down.
+
+With a cached snapshot available, any of these failures instead returns the
+cached body with `200` and `X-GEV-Cache: STALE-ERROR`.
 
 **Caching:** in-memory, TTL ~ `TRANSIT_PROXY_TTL_MS` (documented in
 `src/data/transitProxy.js`); the app's own poll cadence is 15s.
@@ -314,10 +358,25 @@ here only so its existence isn't a surprise.
 
 ## 5. Auth and network exposure (current state)
 
-None of the above requires a token or checks request origin. `plan.md`
-covers adding a bearer-token check and putting nginx (TLS, CORS,
-rate-limiting) in front of `headless.mjs` before it's reachable from
-anywhere but `localhost`.
+None of the above requires a token. `plan.md` covers adding a bearer-token
+check and putting nginx (TLS, CORS, rate-limiting) in front of
+`headless.mjs`. Until then, `headless.mjs` enforces three guards of its own:
+
+- **Loopback by default, fail closed otherwise.** It binds to `127.0.0.1`
+  unless `GEV_HEADLESS_HOST` says otherwise, and it **refuses to start** on any
+  non-loopback address (`0.0.0.0`, `::`, a LAN address, a hostname) unless
+  `GEV_HEADLESS_UNSAFE_PUBLIC=1` is also set, logging a warning when it is.
+- **Host-header check.** Requests whose `Host` is not an IP literal,
+  `localhost`/`*.localhost`, the bind host, or an entry in the
+  comma-separated `GEV_HEADLESS_ALLOWED_HOSTS` are rejected with `403`
+  before routing, which blocks DNS-rebinding attacks. An entry starting with
+  `.` allows a domain and its subdomains, as in Vite's `allowedHosts`. A
+  container reaching a host-run server as `host.docker.internal` needs that
+  name listed.
+- **Bounded shutdown.** On `SIGTERM`/`SIGINT`, in-flight responses get
+  `GEV_HEADLESS_SHUTDOWN_GRACE_MS` (default 5000) to finish before their
+  connections are closed, so a long-lived CCTV stream cannot hold shutdown
+  open.
 
 ## 6. `headless.mjs`-specific exclusions
 
