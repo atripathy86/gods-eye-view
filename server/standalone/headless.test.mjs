@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assertSafeBindHost,
   createHeadlessApiApp,
   healthzPlugin,
   headlessProviderPlugins,
+  isLoopbackHost,
+  startHeadlessApi,
 } from './headless.mjs';
 import { apiNotFoundPlugin } from './api-not-found.js';
 import { localProviderPlugins } from '../providers/local.js';
@@ -113,6 +116,78 @@ test('refuses to build an app that mounts the same path twice', () => {
       }),
     /\/api\/dup \(covered by earlier \/api\/dup\)/,
   );
+});
+
+test('isLoopbackHost accepts only addresses reachable from this machine', () => {
+  for (const host of [
+    '127.0.0.1',
+    '127.1.2.3',
+    'localhost',
+    'LOCALHOST',
+    '::1',
+    '[::1]',
+    '::ffff:127.0.0.1',
+  ]) {
+    assert.equal(isLoopbackHost(host), true, host);
+  }
+  for (const host of [
+    '0.0.0.0',
+    '::',
+    '',
+    '192.168.1.10',
+    '10.0.0.1',
+    'example.com',
+    '127.0.0.256',
+    '128.0.0.1',
+    'localhost.evil.com',
+  ]) {
+    assert.equal(isLoopbackHost(host), false, host);
+  }
+});
+
+test('a non-loopback bind is refused without the explicit opt-in', () => {
+  assert.throws(
+    () => assertSafeBindHost('0.0.0.0', {}),
+    /refusing to bind to "0.0.0.0".*GEV_HEADLESS_UNSAFE_PUBLIC=1/,
+  );
+  assert.throws(
+    () => assertSafeBindHost('::', { GEV_HEADLESS_UNSAFE_PUBLIC: '0' }),
+    /refusing to bind/,
+  );
+  assert.deepEqual(assertSafeBindHost('127.0.0.1', {}), {
+    unsafePublic: false,
+  });
+  assert.deepEqual(
+    assertSafeBindHost('0.0.0.0', { GEV_HEADLESS_UNSAFE_PUBLIC: '1' }),
+    { unsafePublic: true },
+  );
+  assert.deepEqual(
+    assertSafeBindHost('0.0.0.0', { GEV_HEADLESS_UNSAFE_PUBLIC: 'true' }),
+    { unsafePublic: true },
+  );
+});
+
+test('a refused bind fails before any provider is mounted', async () => {
+  // The guard must run before the app is built, so a refused start never
+  // initializes a provider (some start background work as soon as mounted).
+  let mounted = false;
+  const plugin = {
+    name: 'probe',
+    configureServer: () => {
+      mounted = true;
+    },
+  };
+  await assert.rejects(
+    () =>
+      startHeadlessApi({
+        env: {},
+        host: '0.0.0.0',
+        port: 0,
+        plugins: [plugin],
+      }),
+    /refusing to bind/,
+  );
+  assert.equal(mounted, false);
 });
 
 test('close() tears down cleanly even when the server was never started', async () => {

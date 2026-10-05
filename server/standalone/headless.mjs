@@ -144,18 +144,92 @@ const DEFAULT_PORT = 4174;
 const DEFAULT_HOST = '127.0.0.1';
 
 /**
- * Start the headless API, bound to `127.0.0.1` by default — this process has
- * no auth of its own (matching the app's existing same-origin-only design;
- * see `plan.md` for the fork's separate plan to front it with auth/TLS
- * before it's ever reachable off-box). Override with `GEV_HEADLESS_PORT` /
- * `GEV_HEADLESS_HOST`.
+ * Is `host` a loopback bind address, reachable only from this machine?
+ *
+ * Accepts `localhost`, any IPv4 address in 127.0.0.0/8 (also written as
+ * IPv4-mapped IPv6, `::ffff:127.x.x.x`), and IPv6 `::1`, bracketed or not.
+ * This mirrors the loopback sets in `src/keySetupCore.mjs` (`LOCAL_HOSTNAMES`,
+ * `LOOPBACK_ADDRESSES`), which guard the dev-only key-setup endpoint the
+ * same way. It is restated here rather than imported because those sets are
+ * private to a `src/` module, and `server/` should not depend on `src/`
+ * internals for a constant.
+ *
+ * Everything else counts as non-loopback, including the wildcard addresses
+ * (`0.0.0.0`, `::`, an empty host) and any other hostname, since a name can
+ * resolve to a routable address.
+ */
+export function isLoopbackHost(host) {
+  const normalized = String(host ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, '$1');
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  const v4 = normalized.startsWith('::ffff:')
+    ? normalized.slice(7)
+    : normalized;
+  return (
+    /^127(\.\d{1,3}){3}$/.test(v4) &&
+    v4.split('.').every((octet) => Number(octet) <= 255)
+  );
+}
+
+/**
+ * Fail closed on a non-loopback bind (review feedback from kvnloo on #860).
+ *
+ * This process has no authentication of its own, and several `/api` routes
+ * are backed by operator credentials, so binding it to a routable address
+ * turns a local provider process into an open network service. That should
+ * be a deliberate, visible decision rather than a consequence of setting
+ * `GEV_HEADLESS_HOST` and not reading the docs. A non-loopback host is
+ * therefore refused unless `GEV_HEADLESS_UNSAFE_PUBLIC` is `1` or `true`.
+ * There is no auth configuration to accept as an alternative yet; if one is
+ * added, it should also satisfy this check.
+ *
+ * @returns {{ unsafePublic: boolean }} Whether the opt-in was used.
+ * @throws {Error} For a non-loopback host without the opt-in.
+ */
+export function assertSafeBindHost(host, env = process.env) {
+  if (isLoopbackHost(host)) return { unsafePublic: false };
+  if (/^(1|true)$/i.test(String(env.GEV_HEADLESS_UNSAFE_PUBLIC || '').trim())) {
+    return { unsafePublic: true };
+  }
+  throw new Error(
+    `[headless-api] refusing to bind to "${host}": this server has no authentication, ` +
+      'and binding to a non-loopback address would expose every /api route, including ' +
+      'ones backed by operator credentials, to the network. Bind to a loopback address ' +
+      '(the default is 127.0.0.1), or set GEV_HEADLESS_UNSAFE_PUBLIC=1 to accept that ' +
+      'exposure deliberately.',
+  );
+}
+
+/**
+ * Start the headless API, bound to `127.0.0.1` by default. This process has
+ * no auth of its own (matching the app's existing same-origin-only design).
+ * Override the address with `GEV_HEADLESS_PORT` / `GEV_HEADLESS_HOST`; a
+ * non-loopback host additionally requires `GEV_HEADLESS_UNSAFE_PUBLIC=1`
+ * (see `assertSafeBindHost`).
+ *
+ * `env` and `plugins` exist for tests: `plugins` replaces the real provider
+ * composition, which touches network and API-key state as soon as it is
+ * mounted.
  */
 export async function startHeadlessApi({
-  port = Number.parseInt(process.env.GEV_HEADLESS_PORT || '', 10) ||
-    DEFAULT_PORT,
-  host = process.env.GEV_HEADLESS_HOST || DEFAULT_HOST,
+  env = process.env,
+  port = Number.parseInt(env.GEV_HEADLESS_PORT || '', 10) || DEFAULT_PORT,
+  host = env.GEV_HEADLESS_HOST || DEFAULT_HOST,
+  plugins,
 } = {}) {
-  const app = createHeadlessApiApp();
+  // Checked before createHeadlessApiApp(), so a refused start never
+  // initializes a single provider.
+  const { unsafePublic } = assertSafeBindHost(host, env);
+  if (unsafePublic) {
+    console.warn(
+      `[headless-api] WARNING: binding to non-loopback host "${host}" with ` +
+        'GEV_HEADLESS_UNSAFE_PUBLIC set. Every /api route is reachable from the ' +
+        'network without authentication.',
+    );
+  }
+  const app = createHeadlessApiApp(plugins ? { plugins } : undefined);
   await new Promise((resolve) => app.httpServer.listen(port, host, resolve));
   console.log(`[headless-api] listening on http://${host}:${port}`);
   return app;
