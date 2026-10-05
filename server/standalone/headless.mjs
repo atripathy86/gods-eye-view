@@ -424,7 +424,13 @@ if (import.meta.url === invokedPath) {
   } catch (err) {
     // A refused bind or a listen failure: providers are already torn down
     // by startHeadlessApi, so report the reason and exit non-zero.
-    console.error(`[headless-api] failed to start: ${err?.message || err}`);
+    // Our own errors already carry the "[headless-api]" prefix; strip it so
+    // the line does not repeat it ("failed to start: [headless-api] ...").
+    const reason = String(err?.message || err).replace(
+      /^\[headless-api\]\s*/,
+      '',
+    );
+    console.error(`[headless-api] failed to start: ${reason}`);
     process.exit(1);
   }
   const shutdown = (signal) => {
