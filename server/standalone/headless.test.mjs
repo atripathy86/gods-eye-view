@@ -8,11 +8,11 @@ import {
   headlessProviderPlugins,
   isHostAllowed,
   isLoopbackHost,
-  parseAllowedHosts,
   startHeadlessApi,
 } from './headless.mjs';
 import { apiNotFoundPlugin } from './api-not-found.js';
 import { localProviderPlugins } from '../providers/local.js';
+import { resolveAllowedHosts } from '../../build/allowedHosts.js';
 
 function mockReqRes(url, method = 'GET') {
   const req = { url, method, headers: {} };
@@ -193,7 +193,7 @@ test('a refused bind fails before any provider is mounted', async () => {
   assert.equal(mounted, false);
 });
 
-test('isHostAllowed mirrors Vite: IP literals, localhost names, the bind host, and listed hosts', () => {
+test("isHostAllowed applies the Vite servers' rule: IP literals, localhost names, the bind host, and listed hosts", () => {
   const allow = (host, options) => isHostAllowed(host, options);
   for (const host of [
     '127.0.0.1:4174',
@@ -221,20 +221,13 @@ test('isHostAllowed mirrors Vite: IP literals, localhost names, the bind host, a
     }),
     true,
   );
-  assert.equal(
-    allow('api.example.com', { allowedHosts: ['.example.com'] }),
-    true,
-  );
-  assert.equal(allow('example.com', { allowedHosts: ['.example.com'] }), true);
-  assert.equal(
-    allow('badexample.com', { allowedHosts: ['.example.com'] }),
-    false,
-  );
   assert.equal(allow('myhost:4174', { bindHost: 'myhost' }), true);
-  assert.deepEqual(parseAllowedHosts(' a.example , .b.example ,,'), [
-    'a.example',
-    '.b.example',
-  ]);
+  // The env value goes through upstream's resolveAllowedHosts, which drops
+  // suffix and wildcard entries, so `.example.com` allows nothing.
+  const allowedHosts = resolveAllowedHosts(' a.example , .example.com ,*,,');
+  assert.equal(allow('a.example', { allowedHosts }), true);
+  assert.equal(allow('api.example.com', { allowedHosts }), false);
+  assert.equal(allow('example.com', { allowedHosts }), false);
 });
 
 /** One real HTTP request with an explicit Host header against a started server. */
@@ -266,7 +259,7 @@ test('an unexpected Host is rejected before routing, on a real listening server'
     },
   };
   const app = await startHeadlessApi({
-    env: { GEV_HEADLESS_ALLOWED_HOSTS: 'host.docker.internal' },
+    env: { GEV_ALLOWED_HOSTS: 'host.docker.internal' },
     port: 0,
     plugins: [probe, apiNotFoundPlugin()],
   });

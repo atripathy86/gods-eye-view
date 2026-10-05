@@ -180,10 +180,9 @@ test('shadowedMounts accepts the real shape: specific mounts first, catch-all la
     shadowedMounts([
       '/healthz',
       // A name that merely extends an earlier one is not covered by it.
-      '/api/opensky',
-      '/api/opensky-track',
-      '/api/adsblol/mil',
-      '/api/adsblol/trace',
+      '/api/gbfs',
+      '/api/gbfs-extra',
+      '/api/cctv',
       '/api',
     ]),
     [],
@@ -208,4 +207,21 @@ test('calling next() falls through to the next matching mount', () => {
   router.handle(req, res);
   assert.deepEqual(hits, ['first', 'second']);
   assert.equal(res.body, 'done');
+});
+
+test('shadowedMounts lets an exactOnly parent precede its nested routes', () => {
+  const paths = ['/api/flights', '/api/flights/track', '/api'];
+  // Without the hint, the nested route looks unreachable...
+  assert.deepEqual(shadowedMounts(paths), [
+    { path: '/api/flights/track', coveredBy: '/api/flights' },
+  ]);
+  // ...but a parent that passes nested paths on with next() does not cover it.
+  assert.deepEqual(shadowedMounts(paths, { exactOnly: ['/api/flights'] }), []);
+  // It still covers an identical duplicate of itself.
+  assert.deepEqual(
+    shadowedMounts(['/api/flights', '/API/Flights'], {
+      exactOnly: ['/api/flights'],
+    }),
+    [{ path: '/API/Flights', coveredBy: '/api/flights' }],
+  );
 });

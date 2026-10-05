@@ -77,21 +77,34 @@ function mountMatch(url, mountPath) {
  * An identical path mounted twice is the same failure.
  *
  * "Covers" uses `mountMatch` itself, so it follows connect's rules exactly:
- * `/api/opensky` does not cover `/api/opensky-track` (no boundary after the
+ * `/api/gbfs` does not cover `/api/gbfsXYZ` (no boundary after the
  * prefix), but `/api` covers `/api/anything` and `/api.json`. Root mounts
  * (`use(handler)` with no path) are ignored, because they are
  * pass-through middleware by convention rather than routes.
  *
+ * Some providers deliberately mount a nested route after its parent:
+ * `/api/flights` answers only its own path and calls `next()` for anything
+ * below it, so `/api/flights/track` installed later is still reached. Name
+ * such parents in `exactOnly`; they still cover the identical path (that
+ * would be a real duplicate) but no longer cover the paths below them.
+ *
  * @param {string[]} paths Mount paths in installation order.
+ * @param {{exactOnly?: Iterable<string>}} [options]
+ *   `exactOnly`: mounts whose handler passes nested paths on via `next()`.
  * @returns {{path: string, coveredBy: string}[]} Every unreachable mount.
  */
-export function shadowedMounts(paths) {
+export function shadowedMounts(paths, { exactOnly = [] } = {}) {
+  const passesNested = new Set([...exactOnly].map((m) => m.toLowerCase()));
+  const covers = (prior, path) => {
+    if (prior === '/') return false;
+    if (passesNested.has(prior.toLowerCase()))
+      return prior.toLowerCase() === path.toLowerCase();
+    return mountMatch(path, prior).matched;
+  };
   const shadowed = [];
   paths.forEach((path, index) => {
     if (path === '/') return;
-    const earlier = paths
-      .slice(0, index)
-      .find((prior) => prior !== '/' && mountMatch(path, prior).matched);
+    const earlier = paths.slice(0, index).find((prior) => covers(prior, path));
     if (earlier !== undefined) shadowed.push({ path, coveredBy: earlier });
   });
   return shadowed;

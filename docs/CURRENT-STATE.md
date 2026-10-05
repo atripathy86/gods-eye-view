@@ -1077,7 +1077,8 @@ exactly, and refuses to start if any mount would be unreachable (for
 example, the `/api` fallback installed before a provider). It binds to
 loopback by default, refuses a non-loopback bind unless
 `GEV_HEADLESS_UNSAFE_PUBLIC=1` is set, rejects unexpected `Host` headers
-(allowlist: `GEV_HEADLESS_ALLOWED_HOSTS`), and bounds shutdown.
+(by the same rule and `GEV_ALLOWED_HOSTS` allowlist as the Vite servers,
+from `build/allowedHosts.js`), and bounds shutdown.
 `server/apiRoutes.js` is the complete `/api` mount table, as data, for all
 three surfaces; `docs/API_REFERENCE.md` documents a selected subset of those
 routes in detail.

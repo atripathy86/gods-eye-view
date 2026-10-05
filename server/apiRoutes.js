@@ -34,7 +34,10 @@ export const API_FALLBACK_MOUNT = '/api';
 
 export const API_ROUTES = Object.freeze(
   [
-    { mount: '/api/opensky', plugin: 'opensky-proxy' },
+    // `exactOnly`: the handler answers only its own path and calls next() for
+    // anything below it, so the nested `/track` route installed further down
+    // is still reached despite first-match-wins.
+    { mount: '/api/flights', plugin: 'opensky-proxy', exactOnly: true },
     { mount: '/api/celestrak', plugin: 'celestrak-proxy' },
     { mount: '/api/tomtom', plugin: 'tomtom-proxy' },
     { mount: '/api/firms', plugin: 'firms-proxy' },
@@ -56,10 +59,10 @@ export const API_ROUTES = Object.freeze(
     { mount: '/api/gbfs', plugin: 'gbfs-proxy' },
     { mount: '/api/local-receivers/aircraft', plugin: 'local-receivers-proxy' },
     { mount: '/api/transit', plugin: 'transit-proxy' },
-    { mount: '/api/adsblol/mil', plugin: 'adsblol-proxy' },
-    { mount: '/api/ais-live', plugin: 'ais-live-proxy' },
-    { mount: '/api/opensky-track', plugin: 'track-backfill-proxies' },
-    { mount: '/api/adsblol/trace', plugin: 'track-backfill-proxies' },
+    { mount: '/api/military', plugin: 'adsblol-proxy', exactOnly: true },
+    { mount: '/api/vessels', plugin: 'ais-live-proxy' },
+    { mount: '/api/flights/track', plugin: 'track-backfill-proxies' },
+    { mount: '/api/military/track', plugin: 'track-backfill-proxies' },
     { mount: '/api/openai/hud-summary', plugin: 'openai-realtime-proxy' },
     { mount: '/api/realtime/debug-log', plugin: 'openai-realtime-proxy' },
     { mount: '/api/realtime/token', plugin: 'openai-realtime-proxy' },
@@ -87,21 +90,28 @@ export const API_ROUTES = Object.freeze(
  * a boundary alongside `/`, so `/api/gbfs.json` reaches the GBFS handler while
  * `/api/gbfsXYZ` does not and falls through to the catch-all. The first mount
  * that matches wins, which is why this walks the table in install order instead
- * of preferring the longest prefix.
+ * of preferring the longest prefix. A route marked `exactOnly` hands every
+ * path below it (including a dot suffix) on to the next match, exactly as
+ * its handler does with `next()`.
  *
  * @param {string} pathname - Request path, without query or hash.
- * @returns {{mount: string, plugin: string}|undefined} The winning route.
+ * @returns {{mount: string, plugin: string, exactOnly?: boolean}|undefined}
+ *   The winning route.
  */
 export function matchApiRoute(pathname) {
   if (typeof pathname !== 'string' || !pathname.startsWith('/'))
     return undefined;
   // Connect lowercases both sides before comparing the prefix, so
-  // `/API/OpenSky` reaches `/api/opensky`; match that rather than a
+  // `/API/Flights` reaches `/api/flights`; match that rather than a
   // case-sensitive startsWith (server/standalone/connectRouter.js mirrors it too).
   const lowered = pathname.toLowerCase();
-  return API_ROUTES.find(({ mount }) => {
+  return API_ROUTES.find(({ mount, exactOnly }) => {
     if (!lowered.startsWith(mount.toLowerCase())) return false;
-    const next = pathname.charAt(mount.length);
+    const rest = pathname.slice(mount.length);
+    // The handler compares the rewritten url's pathname with '/', and the
+    // rewrite turns '' into '/', so both '' and '/' are its own path.
+    if (exactOnly) return rest === '' || rest === '/';
+    const next = rest.charAt(0);
     return next === '' || next === '/' || next === '.';
   });
 }

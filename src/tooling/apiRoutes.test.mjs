@@ -39,10 +39,23 @@ function installedMounts(hook, context) {
 const DEV = ['configureServer', { command: 'serve', isPreview: false }];
 const PREVIEW = ['configurePreviewServer', { command: 'serve', isPreview: true }];
 
+/**
+ * Paths the client asks for knowing that no bundled provider serves them.
+ * Each one degrades gracefully when the fallback answers 404; keep the reason
+ * next to the entry so a removal is a deliberate decision.
+ */
+const OPTIONAL_CLIENT_PATHS = new Set([
+  // src/maps/googleTokens.js: a deployment's own server *may* mint Google
+  // tile tokens here; any other answer means "use the browser key instead".
+  '/api/google/tiles-token',
+]);
+
 /** Every `/api/...` path the browser bundle asks for, as written in source. */
 function clientApiPaths() {
   const paths = new Set();
-  const reference = /['"`](\/api\/[A-Za-z0-9_./-]*)/g;
+  // A path ends in a name character, so prose in doc comments such as
+  // `/api/...` or `/api/google/*` is not mistaken for a request.
+  const reference = /['"`](\/api\/[A-Za-z0-9_./-]*[A-Za-z0-9_-])(?=['"`?])/g;
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
@@ -153,22 +166,62 @@ test('matching ends a mount at a segment boundary, where a dot also counts', () 
   // Not a boundary: the name merely starts with a mount, so it falls through.
   assert.equal(matchApiRoute('/api/gbfsXYZ')?.mount, API_FALLBACK_MOUNT);
   assert.equal(matchApiRoute('/api/nope')?.mount, API_FALLBACK_MOUNT);
-  // The longer, more specific mount is installed before the shorter one it
-  // extends, so first-match-wins still resolves to the specific handler.
-  assert.equal(matchApiRoute('/api/opensky-track')?.mount, '/api/opensky-track');
-  assert.equal(matchApiRoute('/api/opensky')?.mount, '/api/opensky');
+  // `/api/flights` is installed before its nested `/track` route, which is
+  // reached only because the parent is exactOnly and passes it on.
+  assert.equal(matchApiRoute('/api/flights/track')?.mount, '/api/flights/track');
+  assert.equal(matchApiRoute('/api/flights')?.mount, '/api/flights');
+  assert.equal(matchApiRoute('/api/flights/')?.mount, '/api/flights');
+  assert.equal(matchApiRoute('/api/military/track')?.mount, '/api/military/track');
+  // Anything else below an exactOnly parent falls through to the catch-all.
+  assert.equal(matchApiRoute('/api/flights.json')?.mount, API_FALLBACK_MOUNT);
+  assert.equal(matchApiRoute('/api/flights/other')?.mount, API_FALLBACK_MOUNT);
   assert.equal(matchApiRoute('not-a-path'), undefined);
 });
 
+test('exactOnly routes really hand nested paths on with next()', async () => {
+  // The table's exactOnly flag is a claim about a handler's behavior; check
+  // it against the handler itself, so the flag cannot outlive the code.
+  const exactOnly = API_ROUTES.filter((route) => route.exactOnly);
+  assert.ok(exactOnly.length > 0);
+  const plugins = [localProviderPlugins()].flat(Infinity);
+  for (const { mount, plugin: name } of exactOnly) {
+    const handlers = new Map();
+    const recorder = {
+      middlewares: { use: (path, handler) => handlers.set(path, handler) },
+      httpServer: null,
+      config: { root: repositoryRoot },
+    };
+    plugins.find((plugin) => plugin.name === name).configureServer(recorder);
+    const handler = handlers.get(mount);
+    assert.ok(handler, `${name} mounts ${mount}`);
+    let passed = false;
+    const res = {
+      setHeader() {},
+      writeHead() {
+        assert.fail(`${mount} answered a nested path itself`);
+      },
+      end() {
+        assert.fail(`${mount} answered a nested path itself`);
+      },
+    };
+    await handler({ url: '/track', method: 'GET', headers: {} }, res, () => {
+      passed = true;
+    });
+    assert.equal(passed, true, `${mount} calls next() for /track`);
+  }
+});
+
 test('matching is case-insensitive, as connect compares lowercased prefixes', () => {
-  assert.equal(matchApiRoute('/API/OpenSky')?.mount, '/api/opensky');
+  assert.equal(matchApiRoute('/API/Flights')?.mount, '/api/flights');
   assert.equal(matchApiRoute('/Api/Gbfs.json')?.mount, '/api/gbfs');
   assert.equal(matchApiRoute('/API/NOPE')?.mount, API_FALLBACK_MOUNT);
 });
 
 test('every /api path the client asks for reaches a provider, not the fallback', () => {
   const unreachable = clientApiPaths().filter(
-    (pathname) => matchApiRoute(pathname)?.mount === API_FALLBACK_MOUNT,
+    (pathname) =>
+      !OPTIONAL_CLIENT_PATHS.has(pathname) &&
+      matchApiRoute(pathname)?.mount === API_FALLBACK_MOUNT,
   );
   assert.deepEqual(
     unreachable,

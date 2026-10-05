@@ -1,10 +1,15 @@
 import http from 'node:http';
-import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { localProviderPlugins } from '../providers/local.js';
 import { apiNotFoundPlugin } from './api-not-found.js';
+import { standaloneVoiceTools } from './voiceTools.js';
 import { createConnectRouter, shadowedMounts } from './connectRouter.js';
+import { API_ROUTES } from '../apiRoutes.js';
+import {
+  isAllowedHost,
+  resolveAllowedHosts,
+} from '../../build/allowedHosts.js';
 
 const DEFAULT_PORT = 4174;
 const DEFAULT_HOST = '127.0.0.1';
@@ -52,11 +57,18 @@ const DEV_ONLY_PLUGIN_NAMES = new Set(['gev-key-setup']);
  * returns, minus the dev-only key-setup panel. Filtering by name (rather
  * than re-listing providers here) means this stays in sync automatically as
  * `server/providers/local.js` adds new ones.
+ *
+ * Providers are built exactly as `server/standalone/vite.config.js` builds
+ * them, including the voice tools offered in realtime sessions, so
+ * `/api/realtime/token` hands out the same session here. That config's
+ * `localMcpPlugin` (`/mcp`) is deliberately not mounted: it drives the app
+ * itself and lives outside `/api`, while this server is the `/api` provider
+ * surface only.
  */
 export function headlessProviderPlugins() {
-  return localProviderPlugins().filter(
-    (plugin) => !DEV_ONLY_PLUGIN_NAMES.has(plugin.name),
-  );
+  return localProviderPlugins({
+    realtime: { tools: standaloneVoiceTools() },
+  }).filter((plugin) => !DEV_ONLY_PLUGIN_NAMES.has(plugin.name));
 }
 
 /** Liveness/readiness endpoint — for an orchestrator, and for a remote caller to check before it starts polling. */
@@ -107,56 +119,27 @@ export function healthzPlugin() {
  * authentication and serves credential-backed routes, so it must reject
  * hostnames it does not expect (review feedback on #860).
  *
- * This mirrors Vite's own check (`isHostAllowedWithoutCache` in Vite's
- * bundled server), which `vite dev`/`vite preview` apply to these same
- * routes:
- * - IP literals are always allowed (IPv4, or bracketed IPv6). Rebinding
- *   needs an attacker-controlled *name*, so an address cannot be abused
- *   this way.
+ * The rule is the one `vite dev`/`vite preview` apply to these same routes,
+ * reused from `build/allowedHosts.js` rather than reimplemented, and fed by
+ * the same `GEV_ALLOWED_HOSTS` variable:
+ * - IP literals are always allowed (rebinding needs an attacker-controlled
+ *   *name*, so an address cannot be abused this way).
  * - `localhost` and any `*.localhost` name are allowed.
  * - The configured bind host itself is allowed, when it is a name.
- * - Each entry in `allowedHosts` (from the comma-separated
- *   `GEV_HEADLESS_ALLOWED_HOSTS`) is allowed. As in Vite, an entry with a
- *   leading dot (`.example.com`) allows that domain and all its subdomains.
+ * - Each explicitly listed host is allowed. `resolveAllowedHosts` drops
+ *   suffix (`.example.com`) and wildcard entries on purpose, so every
+ *   allowed name is spelled out.
  * - A missing `Host` header is rejected.
  *
- * Unlike this repository's Vite config, which turns the check off entirely
- * when bound to 0.0.0.0, headless keeps it on: a public bind is exactly
- * when an unexpected hostname should be refused, and a reverse proxy or
- * container can be listed explicitly.
+ * @param {string|undefined} hostHeader
+ * @param {{allowedHosts?: string[], bindHost?: string}} [options]
  */
 export function isHostAllowed(
   hostHeader,
   { allowedHosts = [], bindHost = '' } = {},
 ) {
-  const host = String(hostHeader ?? '')
-    .trim()
-    .toLowerCase();
-  if (!host) return false;
-  if (host.startsWith('[')) {
-    const end = host.indexOf(']');
-    return end > 0 && net.isIP(host.slice(1, end)) === 6;
-  }
-  const hostname = host.replace(/:\d+$/, '');
-  if (net.isIP(hostname) === 4) return true;
-  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
-  if (bindHost && hostname === String(bindHost).toLowerCase()) return true;
-  return allowedHosts.some((entry) => {
-    const allowed = String(entry).trim().toLowerCase();
-    if (!allowed) return false;
-    if (allowed.startsWith('.')) {
-      return hostname === allowed.slice(1) || hostname.endsWith(allowed);
-    }
-    return hostname === allowed;
-  });
-}
-
-/** Parses the comma-separated `GEV_HEADLESS_ALLOWED_HOSTS` value. */
-export function parseAllowedHosts(value) {
-  return String(value ?? '')
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const additional = bindHost ? [String(bindHost).toLowerCase()] : [];
+  return isAllowedHost(hostHeader, allowedHosts, additional);
 }
 
 /**
@@ -194,7 +177,7 @@ export function createHeadlessApiApp({
         JSON.stringify({
           error: 'host_not_allowed',
           host: String(req.headers.host ?? '').replace(/:\d+$/, ''),
-          hint: 'Add this host to GEV_HEADLESS_ALLOWED_HOSTS to allow it.',
+          hint: 'Add this host to GEV_ALLOWED_HOSTS to allow it.',
         }),
       );
       return;
@@ -262,7 +245,11 @@ export function createHeadlessApiApp({
   // correct. Refuse to build such an app rather than serve it. The real
   // composition is also pinned against server/apiRoutes.js by
   // src/tooling/apiRoutes.test.mjs; this check covers any composition.
-  const shadowed = shadowedMounts(router.mounts());
+  // Parents that pass nested paths on (server/apiRoutes.js `exactOnly`) are
+  // allowed to precede their nested routes.
+  const shadowed = shadowedMounts(router.mounts(), {
+    exactOnly: API_ROUTES.filter((r) => r.exactOnly).map((r) => r.mount),
+  });
   if (shadowed.length) {
     // Providers were already configured above, and some start background
     // work when mounted, so tear them down before refusing.
@@ -346,7 +333,7 @@ export function assertSafeBindHost(host, env = process.env) {
  * non-loopback host additionally requires `GEV_HEADLESS_UNSAFE_PUBLIC=1`
  * (see `assertSafeBindHost`). Requests whose `Host` is not an IP literal,
  * a localhost name, the bind host, or listed in the comma-separated
- * `GEV_HEADLESS_ALLOWED_HOSTS` are rejected with 403 (see `isHostAllowed`).
+ * `GEV_ALLOWED_HOSTS` are rejected with 403 (see `isHostAllowed`).
  *
  * `env` and `plugins` exist for tests: `plugins` replaces the real provider
  * composition, which touches network and API-key state as soon as it is
@@ -370,7 +357,7 @@ export async function startHeadlessApi({
   }
   const app = createHeadlessApiApp({
     ...(plugins ? { plugins } : {}),
-    allowedHosts: parseAllowedHosts(env.GEV_HEADLESS_ALLOWED_HOSTS),
+    allowedHosts: resolveAllowedHosts(env.GEV_ALLOWED_HOSTS),
     bindHost: host,
     shutdownGraceMs:
       Number.parseInt(env.GEV_HEADLESS_SHUTDOWN_GRACE_MS || '', 10) ||

@@ -7,8 +7,9 @@
   `vite dev`/`vite preview` use onto a plain Node server, so the provider
   API can run unattended — CONTRIBUTING.md already notes `vite preview`
   "is not a production server". It refuses a non-loopback bind unless
-  `GEV_HEADLESS_UNSAFE_PUBLIC=1` is set, rejects unexpected `Host` headers,
-  and bounds shutdown. `server/apiRoutes.js` lists every `/api` mount as data,
+  `GEV_HEADLESS_UNSAFE_PUBLIC=1` is set, rejects unexpected `Host` headers
+  with the same rule and `GEV_ALLOWED_HOSTS` list as the dev and preview
+  servers, and bounds shutdown. `server/apiRoutes.js` lists every `/api` mount as data,
   with a test pinning it against the dev, preview and headless servers
   (daikaginza, #793), and `docs/API_REFERENCE.md` documents a selected subset
   of those routes in detail (atripathy86, #860).
@@ -437,6 +438,7 @@
 Add feed provenance to analyst/view answers and HUD context while retaining existing response fields and runner ownership (Matt Van Horn, #347).
 
 Analyst records for loaded satellites, datacenters and dams, with explicit bounded count/rank coverage (Matt Van Horn, #351).
+
 - New Fire Perimeters layer (Events group): live NIFC WFIGS interagency
   wildfire incident perimeters as ground-clamped polygons with a
   containment-colored fire line, refreshed every 5 minutes from the public
@@ -712,7 +714,6 @@ This changelog records public product changes. For the authoritative description
 of current runtime behavior, see [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md).
 
 ### Other changes
-
 
 - Add ECMWF IFS model selection to Wind (#464, thanks @beneduzi), with model-scoped forecast-step caches, cancellation of replaced requests, and separate issue/valid timestamps.
 
@@ -1522,4 +1523,3 @@ represent previously published GitHub Releases.
 ## [0.1.0] — 2026-02-09
 
 - Initial project version.
-
