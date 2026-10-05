@@ -88,8 +88,12 @@ export const API_ROUTES = Object.freeze(
 export function matchApiRoute(pathname) {
   if (typeof pathname !== 'string' || !pathname.startsWith('/'))
     return undefined;
+  // Connect lowercases both sides before comparing the prefix, so
+  // `/API/OpenSky` reaches `/api/opensky`; match that rather than a
+  // case-sensitive startsWith (server/standalone/connectRouter.js mirrors it too).
+  const lowered = pathname.toLowerCase();
   return API_ROUTES.find(({ mount }) => {
-    if (!pathname.startsWith(mount)) return false;
+    if (!lowered.startsWith(mount.toLowerCase())) return false;
     const next = pathname.charAt(mount.length);
     return next === '' || next === '/' || next === '.';
   });

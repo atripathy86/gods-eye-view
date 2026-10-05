@@ -25,22 +25,40 @@ function splitUrl(url) {
 
 /**
  * Does `url` fall under `mountPath`, and if so what's left of it once the
- * mount prefix is stripped? Mirrors `connect`'s own mount matching: an exact
- * pathname match rewrites to `/` (plus any query string), a deeper path
- * rewrites to the remainder — both keeping the query string intact so a
- * handler's own `new URL(req.url, 'http://localhost')` still sees it.
+ * mount prefix is stripped?
+ *
+ * This must reproduce Vite's bundled `connect` exactly
+ * (`node_modules/vite/dist/node/chunks/dep-*.js`, the `call`/`handle`
+ * routing in connect's `index.js`), because the same plugins run under both
+ * and a divergence fails silently: a request one server routes to a
+ * provider, the other hands to the `/api` catch-all. Connect's rules are:
+ *
+ * - The prefix comparison is case-insensitive (`/API/OpenSky` reaches
+ *   `/api/opensky`).
+ * - The match must end at a boundary: end of path, `/`, **or `.`**. So
+ *   `/api/gbfs.json` reaches a `/api/gbfs` mount, while `/api/gbfsXYZ` does
+ *   not.
+ * - `req.url` is rewritten by removing the mount's length from the front of
+ *   the whole URL, query string included, and then prefixing a `/` if the
+ *   remainder does not already start with one. That yields `/` for an exact
+ *   match, `/?q=1` for an exact match with a query string, `/x` for
+ *   `/mount/x`, and `/.json` for `/mount.json`.
+ *
+ * `server/apiRoutes.js` `matchApiRoute` applies the same rules to the
+ * mount table, and `src/tooling/apiRoutes.test.mjs` pins them there.
  */
 function mountMatch(url, mountPath) {
   if (mountPath === '/') return { matched: true, rest: url };
-  const { pathname, search } = splitUrl(url);
-  if (pathname === mountPath) return { matched: true, rest: `/${search}` };
-  if (pathname.startsWith(`${mountPath}/`)) {
-    return {
-      matched: true,
-      rest: `${pathname.slice(mountPath.length)}${search}`,
-    };
+  const { pathname } = splitUrl(url);
+  if (pathname.slice(0, mountPath.length).toLowerCase() !== mountPath.toLowerCase()) {
+    return { matched: false, rest: null };
   }
-  return { matched: false, rest: null };
+  const boundary = pathname.charAt(mountPath.length);
+  if (boundary !== '' && boundary !== '/' && boundary !== '.') {
+    return { matched: false, rest: null };
+  }
+  const rest = url.slice(mountPath.length);
+  return { matched: true, rest: rest.startsWith('/') ? rest : `/${rest}` };
 }
 
 function defaultNotFound(_req, res) {

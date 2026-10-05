@@ -138,6 +138,12 @@ test('matching ends a mount at a segment boundary, where a dot also counts', () 
   assert.equal(matchApiRoute('not-a-path'), undefined);
 });
 
+test('matching is case-insensitive, as connect compares lowercased prefixes', () => {
+  assert.equal(matchApiRoute('/API/OpenSky')?.mount, '/api/opensky');
+  assert.equal(matchApiRoute('/Api/Gbfs.json')?.mount, '/api/gbfs');
+  assert.equal(matchApiRoute('/API/NOPE')?.mount, API_FALLBACK_MOUNT);
+});
+
 test('every /api path the client asks for reaches a provider, not the fallback', () => {
   const unreachable = clientApiPaths().filter(
     (pathname) => matchApiRoute(pathname)?.mount === API_FALLBACK_MOUNT,

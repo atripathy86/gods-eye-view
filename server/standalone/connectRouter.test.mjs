@@ -111,6 +111,54 @@ test('a handler that rejects asynchronously is also turned into a 500', async ()
   assert.equal(res.statusCode, 500);
 });
 
+// Parity with Vite's bundled connect (node_modules/vite/dist/node/chunks/
+// dep-*.js, connect's call/handle): the same plugins run under both servers,
+// so any routing difference silently sends a request to a different handler.
+// Each row is [request url, what the /api/gbfs handler sees as req.url, or
+// null when the request must fall through to the /api catch-all instead].
+const CONNECT_PARITY = [
+  ['/api/gbfs', '/'],
+  ['/api/gbfs?city=austin', '/?city=austin'],
+  ['/api/gbfs/station_information', '/station_information'],
+  // Connect treats "." as a segment boundary, alongside "/".
+  ['/api/gbfs.json', '/.json'],
+  ['/api/gbfs.json?x=1', '/.json?x=1'],
+  // Connect compares the prefix case-insensitively.
+  ['/API/GBFS/feeds', '/feeds'],
+  ['/Api/Gbfs', '/'],
+  // Merely starting with the mount's name is not a match.
+  ['/api/gbfsXYZ', null],
+  ['/api/gbfs_extra', null],
+  ['/api/gbf', null],
+];
+
+for (const [url, expectedRest] of CONNECT_PARITY) {
+  test(`connect parity: ${url} -> ${expectedRest ?? 'falls through to /api'}`, () => {
+    const router = createConnectRouter();
+    let seen = null;
+    let fellThrough = false;
+    router.use('/api/gbfs', (req, res) => {
+      seen = req.url;
+      res.writeHead(200, {});
+      res.end();
+    });
+    router.use('/api', (_req, res) => {
+      fellThrough = true;
+      res.writeHead(404, {});
+      res.end();
+    });
+    const { req, res } = mockReqRes(url);
+    router.handle(req, res);
+    if (expectedRest === null) {
+      assert.equal(fellThrough, true);
+      assert.equal(seen, null);
+    } else {
+      assert.equal(seen, expectedRest);
+      assert.equal(fellThrough, false);
+    }
+  });
+}
+
 test('calling next() falls through to the next matching mount', () => {
   const router = createConnectRouter();
   const hits = [];
