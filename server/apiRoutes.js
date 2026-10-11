@@ -14,8 +14,8 @@
  * installed last. Move it earlier and it swallows every route below it while
  * every individual handler still looks correct in isolation.
  *
- * The surface is not the same in both servers: 34 mounts under `npm run dev`
- * against 32 under `npm run preview`. `gev-key-setup` keeps its two
+ * The surface is not the same in both servers: 38 mounts under `npm run dev`
+ * against 36 under `npm run preview`. `gev-key-setup` keeps its two
  * `/api/setup` mounts out of preview twice over, and deliberately — it declares
  * `apply: command === 'serve' && !isPreview`, and it also defines only
  * `configureServer`, never `configurePreviewServer`, because (as its own note
@@ -26,7 +26,7 @@
  * The standalone server (`server/standalone/headless.mjs`, #860) is a third
  * surface. It calls every plugin's `configureServer` itself and ignores
  * `apply`, keeping key setup out by plugin name instead, so it reaches the
- * same 32 mounts as preview by a different route. The test checks it
+ * same 36 mounts as preview by a different route. The test checks it
  * separately for that reason. Headless also serves `/healthz`, which sits
  * outside `/api` and therefore outside this table.
  */
@@ -66,6 +66,10 @@ export const API_ROUTES = Object.freeze(
     { mount: '/api/openai/hud-summary', plugin: 'openai-realtime-proxy' },
     { mount: '/api/realtime/debug-log', plugin: 'openai-realtime-proxy' },
     { mount: '/api/realtime/token', plugin: 'openai-realtime-proxy' },
+    // OAuth sign-in for Realtime. The login route starts `codex login` on the
+    // server's own host, so it is same-site gated like the rest of this plugin.
+    { mount: '/api/realtime/oauth-status', plugin: 'openai-realtime-proxy' },
+    { mount: '/api/realtime/oauth-login', plugin: 'openai-realtime-proxy' },
     {
       mount: '/api/google/nearby-places',
       plugin: 'google-places-context-proxy',
@@ -74,6 +78,8 @@ export const API_ROUTES = Object.freeze(
     { mount: '/api/wind', plugin: 'wind' },
     { mount: '/api/weather', plugin: 'weather' },
     { mount: '/api/cyclones', plugin: 'cyclones' },
+    { mount: '/api/mapillary/status', plugin: 'mapillary-proxy' },
+    { mount: '/api/mapillary/tiles', plugin: 'mapillary-proxy' },
     { mount: '/api/fire-perimeters', plugin: 'fire-perimeters' },
     // Dev server only: the plugin's `apply` excludes the preview server.
     { mount: '/api/setup/status', plugin: 'gev-key-setup', serveOnly: true },
